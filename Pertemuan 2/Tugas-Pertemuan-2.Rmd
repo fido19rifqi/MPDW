@@ -1,0 +1,314 @@
+---
+title: "Tugas Pertemuan 2 - Metode Peramalan Deret Waktu"
+author: "Fido Ahmad"
+date: "`r Sys.Date()`"
+output: rmdformats::readthedown
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Library/Packages
+
+```{r}
+library(readxl)
+library(forecast)
+library(TTR)
+library(ggplot2)
+```
+
+## Deskripsi Data
+
+Data yang digunakan adalah jumlah pegawai pemerintah daerah di sektor pendidikan (CES9093161101, sumber BLS via FRED, satuan ribuan orang, seasonally adjusted), bagian saya yaitu periode ke 683-852 dari data kelompok (170 observasi, Nov 2011 - Des 2025, bulanan).
+
+## Impor Data
+
+```{r}
+raw <- read_excel("CES9093161101.xlsx", sheet = "Monthly")
+bagian <- raw[683:852, ]
+bagian$Periode <- 1:nrow(bagian)
+head(bagian)
+```
+
+## Eksplorasi Data
+
+```{r}
+str(bagian)
+dim(bagian)
+
+full.ts <- ts(bagian$CES9093161101, start = c(2011, 11), frequency = 12)
+summary(full.ts)
+```
+
+```{r}
+ts.plot(full.ts, xlab = "Waktu", ylab = "Ribuan Pegawai",
+        main = "Plot Data - Pegawai Pendidikan Pemda (Fido)")
+points(full.ts)
+```
+
+Data menunjukkan pola tren naik tanpa pola musiman yang jelas. Ini wajar karena data sudah *seasonally adjusted* oleh BLS sebelum dipublikasikan, sehingga efek musiman aslinya sudah dihilangkan di sumbernya.
+
+## Pembagian Data (80% Latih, 20% Uji)
+
+```{r}
+n <- length(full.ts)
+n_train <- floor(0.8 * n)
+n_test <- n - n_train
+
+# window() dipakai (bukan slice+re-ts) supaya tanggal bulanan tetap konsisten
+train.ts <- window(full.ts, end = time(full.ts)[n_train])
+test.ts  <- window(full.ts, start = time(full.ts)[n_train + 1])
+
+training <- bagian[1:n_train, ]
+testing  <- bagian[(n_train + 1):n, ]
+
+n_train
+n_test
+```
+
+```{r}
+plot(full.ts, col = "red", main = "Plot Semua Data")
+points(full.ts)
+
+plot(train.ts, col = "blue", main = "Plot Data Latih")
+points(train.ts)
+
+plot(test.ts, col = "blue", main = "Plot Data Uji")
+points(test.ts)
+```
+
+```{r}
+ggplot() +
+  geom_line(data = training, aes(x = Periode, y = CES9093161101, col = "Data Latih")) +
+  geom_line(data = testing, aes(x = Periode, y = CES9093161101, col = "Data Uji")) +
+  labs(x = "Periode", y = "Ribuan Pegawai", color = "Legend") +
+  scale_colour_manual(name = "Keterangan:", breaks = c("Data Latih", "Data Uji"),
+                       values = c("blue", "red")) +
+  theme_bw() + theme(legend.position = "bottom")
+```
+
+## Fungsi Akurasi
+
+Dipakai konsisten untuk semua metode, mengabaikan pasangan actual-ramalan yang NA.
+
+```{r}
+akurasi <- function(actual, ramalan) {
+  e <- actual - ramalan
+  valid <- !is.na(e) & !is.na(actual)
+  e <- e[valid]; a <- actual[valid]
+  c(SSE = sum(e^2), MSE = mean(e^2), RMSE = sqrt(mean(e^2)), MAPE = mean(abs(e / a)) * 100)
+}
+```
+
+## Single Moving Average (SMA)
+
+```{r}
+m_list <- 2:12
+hasil <- sapply(m_list, function(m) {
+  sma_val <- SMA(train.ts, n = m)
+  fitted_sma <- c(NA, sma_val[-n_train])
+  akurasi(as.numeric(train.ts), fitted_sma)["RMSE"]
+})
+names(hasil) <- m_list
+hasil
+which.min(hasil)
+```
+
+Orde m = 2 dipakai berdasarkan hasil trial-and-error (RMSE minimum di antara m = 2 sampai 12).
+
+```{r}
+m <- 2
+data.sma <- SMA(train.ts, n = m)
+data.ramal <- c(NA, data.sma)
+
+h <- n_test
+forecast.sma <- rep(data.ramal[length(data.ramal)], h)
+
+data.gab.sma <- cbind(
+  aktual = as.numeric(full.ts),
+  pemulusan = c(data.sma, rep(NA, h)),
+  ramalan = c(data.ramal, rep(forecast.sma[1], h - 1))
+)
+```
+
+```{r}
+ts.plot(full.ts, xlab = "Waktu", ylab = "Ribuan Pegawai", main = paste("SMA m =", m))
+points(full.ts)
+lines(data.gab.sma[, "pemulusan"], col = "green", lwd = 2)
+lines(data.gab.sma[, "ramalan"], col = "red", lwd = 2)
+legend("topleft", c("aktual", "pemulusan", "ramalan"),
+       col = c("black", "green", "red"), lty = 1, cex = 0.6)
+```
+
+### Akurasi Data Latih
+
+```{r}
+acc_train_sma <- akurasi(as.numeric(train.ts)[(m + 1):n_train], data.ramal[(m + 1):n_train])
+acc_train_sma
+```
+
+### Akurasi Data Uji
+
+```{r}
+idx_test <- (n_train + 1):n
+acc_test_sma <- akurasi(as.numeric(test.ts), data.gab.sma[idx_test, "ramalan"])
+acc_test_sma
+```
+
+## Double Moving Average (DMA)
+
+```{r}
+s1 <- SMA(train.ts, n = m)
+s2 <- SMA(s1, n = m)
+At <- 2 * s1 - s2
+Bt <- (2 / (m - 1)) * (s1 - s2)
+
+data.dma <- At + Bt
+data.ramal2 <- c(NA, data.dma)
+
+t_ahead <- 1:h
+f <- At[length(At)] + Bt[length(Bt)] * t_ahead
+
+data.gab.dma <- cbind(
+  aktual = as.numeric(full.ts),
+  pemulusan1 = c(s1, rep(NA, h)),
+  pemulusan2 = c(s2, rep(NA, h)),
+  ramalan = c(data.ramal2, f[-1])
+)
+```
+
+```{r}
+ts.plot(full.ts, xlab = "Waktu", ylab = "Ribuan Pegawai", main = paste("DMA m =", m))
+points(full.ts)
+lines(data.gab.dma[, "pemulusan2"], col = "green", lwd = 2)
+lines(data.gab.dma[, "ramalan"], col = "red", lwd = 2)
+legend("topleft", c("aktual", "pemulusan", "ramalan"),
+       col = c("black", "green", "red"), lty = 1, cex = 0.6)
+```
+
+### Akurasi Data Latih
+
+```{r}
+start_idx <- 2 * m
+acc_train_dma <- akurasi(as.numeric(train.ts)[start_idx:n_train], data.ramal2[start_idx:n_train])
+acc_train_dma
+```
+
+### Akurasi Data Uji
+
+```{r}
+acc_test_dma <- akurasi(as.numeric(test.ts), data.gab.dma[idx_test, "ramalan"])
+acc_test_dma
+```
+
+## Single Exponential Smoothing (SES)
+
+Parameter alpha dioptimalkan otomatis (bukan diset manual) lewat `ses()`.
+
+```{r}
+ses_fit <- ses(train.ts, h = h)
+ses_fit$model
+```
+
+```{r}
+autoplot(ses_fit) +
+  autolayer(fitted(ses_fit), series = "Fitted") +
+  ylab("Ribuan Pegawai") + xlab("Waktu")
+```
+
+### Akurasi Data Latih
+
+```{r}
+acc_train_ses <- akurasi(as.numeric(train.ts), as.numeric(fitted(ses_fit)))
+acc_train_ses
+```
+
+### Akurasi Data Uji
+
+```{r}
+acc_test_ses <- akurasi(as.numeric(test.ts), as.numeric(ses_fit$mean))
+acc_test_ses
+```
+
+## Double Exponential Smoothing / Holt (DES)
+
+Menangkap level sekaligus tren, alpha dan beta dioptimalkan otomatis lewat `holt()`.
+
+```{r}
+des_fit <- holt(train.ts, h = h)
+des_fit$model
+```
+
+```{r}
+autoplot(des_fit) +
+  autolayer(fitted(des_fit), series = "Fitted") +
+  ylab("Ribuan Pegawai") + xlab("Waktu")
+```
+
+### Akurasi Data Latih
+
+```{r}
+acc_train_des <- akurasi(as.numeric(train.ts), as.numeric(fitted(des_fit)))
+acc_train_des
+```
+
+### Akurasi Data Uji
+
+```{r}
+acc_test_des <- akurasi(as.numeric(test.ts), as.numeric(des_fit$mean))
+acc_test_des
+```
+
+## Holt-Winters
+
+Disertakan untuk melengkapi instruksi tugas, meski komponen musimannya diperkirakan kurang bermakna karena data sumber sudah *seasonally adjusted* (lihat bagian Eksplorasi Data).
+
+```{r}
+hw_fit <- HoltWinters(train.ts)
+hw_forecast <- forecast(hw_fit, h = h)
+```
+
+```{r}
+plot(hw_fit)
+```
+
+### Akurasi Data Latih
+
+```{r}
+train_hw_actual <- window(train.ts, start = start(fitted(hw_fit)))
+acc_train_hw <- akurasi(as.numeric(train_hw_actual), as.numeric(fitted(hw_fit)[, "xhat"]))
+acc_train_hw
+```
+
+### Akurasi Data Uji
+
+```{r}
+acc_test_hw <- akurasi(as.numeric(test.ts), as.numeric(hw_forecast$mean))
+acc_test_hw
+```
+
+## Perbandingan Metode & Kesimpulan
+
+```{r}
+tabel <- rbind(
+  SMA          = c(acc_train_sma, acc_test_sma),
+  DMA          = c(acc_train_dma, acc_test_dma),
+  SES          = c(acc_train_ses, acc_test_ses),
+  DES          = c(acc_train_des, acc_test_des),
+  `Holt-Winters` = c(acc_train_hw, acc_test_hw)
+)
+colnames(tabel) <- c("SSE_Latih", "MSE_Latih", "RMSE_Latih", "MAPE_Latih",
+                      "SSE_Uji", "MSE_Uji", "RMSE_Uji", "MAPE_Uji")
+tabel <- round(tabel, 3)
+knitr::kable(tabel)
+```
+
+```{r}
+terbaik <- rownames(tabel)[which.min(tabel[, "MAPE_Uji"])]
+terbaik
+```
+
+Metode terbaik dipilih berdasarkan **MAPE data uji** terkecil, karena MAPE scale-free (adil dibandingkan antar metode) dan data uji mengukur kemampuan generalisasi ke data yang tidak dipakai fitting, bukan sekadar kecocokan terhadap data latih.
+
+Berdasarkan tabel di atas, metode terbaik untuk data ini adalah **`r terbaik`**. Holt-Winters diperkirakan tidak unggul karena data sumber sudah seasonally adjusted, sehingga komponen musiman yang coba ditangkapnya tidak punya banyak sinyal nyata untuk dipelajari.
