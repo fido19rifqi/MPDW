@@ -1,0 +1,549 @@
+---
+title: "Latihan Pertemuan 4 MPDW - Pembangkitan Proses MA(2), AR(2), dan ARMA(2,2)"
+subtitle: 
+author: "Fido Ahmad"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output: rmdformats::readthedown
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 8,
+  fig.height = 4.5
+)
+```
+
+# Persiapan
+
+```{r paket}
+library(TSA)      # eacf
+library(tseries)  # adf.test
+```
+
+```{r pengaturan}
+set.seed(1234)
+
+n      <- 300     # banyaknya data yang dibangkitkan
+theta1 <- 0.4     # koefisien MA orde 1
+theta2 <- 0.6     # koefisien MA orde 2
+phi1   <- 0.5     # koefisien AR orde 1
+phi2   <- 0.2     # koefisien AR orde 2
+```
+
+## Konvensi tanda
+
+Latihan ini menggunakan konvensi pembangkitan yang konsisten dengan fungsi `arima.sim()` dan `ARMAacf()` di R, yaitu komponen MA bertanda positif:
+
+\[
+Y_t = \phi_1 Y_{t-1} + \phi_2 Y_{t-2} + e_t + \theta_1 e_{t-1} + \theta_2 e_{t-2}
+\]
+
+Buku Box-Jenkins menggunakan konvensi tanda negatif pada komponen MA, sehingga autokorelasi teoritisnya dituliskan dengan \(-\theta\). Selama pembangkitan data dan perhitungan teoritis memakai konvensi yang sama, hasilnya identik. Pada latihan ini konvensi R dipakai secara konsisten agar nilai simulasi dan nilai teoritis langsung sebanding.
+
+## Fungsi bantu
+
+Fungsi berikut dipakai berulang untuk membandingkan autokorelasi hasil simulasi dengan autokorelasi teoritis sampai lag 3.
+
+```{r fungsi-bantu}
+# Autokorelasi empirik pada lag 1 sampai 3, dihitung dua cara:
+# (1) melalui acf(), (2) melalui cor() pada pasangan (Y_t, Y_{t-k})
+banding_acf <- function(x, rho_teori, lag_max = 3) {
+  x  <- as.numeric(x)
+  N  <- length(x)
+  ac <- as.vector(stats::acf(x, lag.max = lag_max, plot = FALSE)$acf)[-1]
+  cr <- sapply(1:lag_max, function(k) cor(x[-(1:k)], x[1:(N - k)]))
+
+  data.frame(
+    lag        = 1:lag_max,
+    teoritis   = round(rho_teori, 4),
+    acf_r      = round(ac, 4),
+    cor_manual = round(cr, 4),
+    selisih    = round(ac - rho_teori, 4)
+  )
+}
+
+# Scatterplot Y_t terhadap Y_{t-k} untuk k = 1, 2, 3
+plot_lag <- function(x, judul) {
+  x <- as.numeric(x)
+  N <- length(x)
+  par(mfrow = c(1, 3), mar = c(4, 4, 3, 1))
+  for (k in 1:3) {
+    yt   <- x[-(1:k)]
+    ytk  <- x[1:(N - k)]
+    plot(x = ytk, y = yt,
+         xlab = paste0("Yt-", k), ylab = "Yt",
+         main = paste0(judul, ": Yt vs Yt-", k))
+    abline(lm(yt ~ ytk), col = "red", lwd = 2)
+  }
+  par(mfrow = c(1, 1))
+}
+```
+
+# Proses MA(2)
+
+Model yang dibangkitkan:
+
+\[
+Y_t = e_t + 0.4\,e_{t-1} + 0.6\,e_{t-2}, \qquad e_t \sim N(0,1)
+\]
+
+## Pembangkitan data
+
+### Cara manual
+
+Karena dibutuhkan dua nilai *white noise* sebelum \(t\), dibangkitkan `n + 2` nilai *white noise* lalu dua nilai pertama dipakai sebagai nilai awal. Dengan cara ini seluruh 300 pengamatan terbentuk dari rumus MA(2) yang lengkap, tanpa nilai awal buatan.
+
+```{r ma2-manual}
+set.seed(1234)
+wn_ma <- rnorm(n + 2)
+
+ma2_manual <- numeric(n)
+for (i in 1:n) {
+  ma2_manual[i] <- wn_ma[i + 2] + theta1 * wn_ma[i + 1] + theta2 * wn_ma[i]
+}
+ma2_manual <- ts(ma2_manual)
+
+head(ma2_manual, 10)
+```
+
+### Dengan `arima.sim()`
+
+```{r ma2-sim}
+set.seed(1234)
+ma2_sim <- arima.sim(list(order = c(0, 0, 2), ma = c(theta1, theta2)), n = n)
+
+head(ma2_sim, 10)
+```
+
+Kedua deret merupakan gambaran dari proses yang sama, tetapi bukan deret yang identik. `arima.sim()` membangkitkan galat tambahan untuk inisialisasi, sehingga urutan bilangan acak yang dipakai berbeda dengan versi manual walaupun *seed* yang dipasang sama.
+
+```{r ma2-banding-deret, fig.height=4}
+par(mfrow = c(1, 2))
+ts.plot(ma2_manual, main = "MA(2) manual", ylab = "Yt")
+ts.plot(ma2_sim, main = "MA(2) arima.sim", ylab = "Yt")
+par(mfrow = c(1, 1))
+```
+
+## Plot deret waktu
+
+```{r ma2-ts}
+ts.plot(ma2_manual, main = "Plot Deret Waktu MA(2)", ylab = "Yt")
+abline(h = mean(ma2_manual), col = "red", lty = 2)
+```
+
+Data berfluktuasi di sekitar satu nilai tengah yang tetap, tanpa tren naik atau turun, dan lebar fluktuasinya relatif sama sepanjang waktu.
+
+## Plot ACF
+
+```{r ma2-acf}
+stats::acf(ma2_manual, lag.max = 20, main = "ACF MA(2)")
+```
+
+ACF *cuts off* setelah lag 2. Lag 1 dan lag 2 nyata, sedangkan lag 3 dan seterusnya berada di dalam batas kepercayaan. Pola ini sesuai teori: pada MA(q), \(\rho_k = 0\) untuk \(k > q\), dan di sini \(q = 2\).
+
+## Plot PACF
+
+```{r ma2-pacf}
+pacf(ma2_manual, lag.max = 20, main = "PACF MA(2)")
+```
+
+PACF *tails off*, menurun secara bertahap dengan tanda yang bergantian membentuk pola gelombang teredam. Kombinasi ACF *cuts off* di lag 2 dengan PACF *tails off* merupakan tanda pengenal MA(2).
+
+## Plot EACF
+
+```{r ma2-eacf}
+eacf(ma2_manual, ar.max = 5, ma.max = 5)
+```
+
+Ujung kiri atas segitiga nol berada pada baris AR = 0 dan kolom MA = 2, sehingga EACF menyarankan ordo MA(2), sesuai dengan model yang dibangkitkan.
+
+## Identifikasi kestasioneran
+
+```{r ma2-stasioner}
+# Akar polinomial MA: 1 + 0.4B + 0.6B^2 = 0
+akar_ma <- polyroot(c(1, theta1, theta2))
+Mod(akar_ma)
+
+adf.test(ma2_manual)
+```
+
+Proses MA dengan orde terbatas selalu stasioner untuk nilai \(\theta\) berapapun, karena \(Y_t\) hanya merupakan kombinasi linear berhingga dari *white noise*, sehingga nilai harapan dan ragamnya tidak bergantung pada \(t\):
+
+\[
+E(Y_t) = 0, \qquad
+\mathrm{Var}(Y_t) = \sigma^2 (1 + \theta_1^2 + \theta_2^2) = 1{,}52
+\]
+
+Uji ADF memberi kesimpulan yang sama, yaitu hipotesis adanya akar unit ditolak, sehingga data stasioner. Modulus akar polinomial MA sebesar 1,291 lebih besar dari 1, sehingga proses ini juga *invertible*.
+
+## Scatterplot antarlag
+
+```{r ma2-scatter, fig.width=12, fig.height=4}
+plot_lag(ma2_manual, "MA(2)")
+```
+
+Hubungan pada lag 1 dan lag 2 terlihat positif dengan kemiringan garis yang jelas. Pada lag 3 titik-titik menyebar tanpa arah dan garis regresinya hampir mendatar, sesuai dengan \(\rho_3 = 0\).
+
+## Autokorelasi simulasi dan teoritis
+
+Untuk MA(2) dengan konvensi tanda positif berlaku
+
+\[
+\rho_1=\frac{\theta_1+\theta_1\theta_2}{1+\theta_1^2+\theta_2^2}, \qquad
+\rho_2=\frac{\theta_2}{1+\theta_1^2+\theta_2^2}, \qquad
+\rho_k=0 \ \text{untuk} \ k>2
+\]
+
+sehingga
+
+\[
+\rho_1=\frac{0.4+0.24}{1.52}=0{,}4211, \qquad
+\rho_2=\frac{0.6}{1.52}=0{,}3947, \qquad
+\rho_3=0
+\]
+
+```{r ma2-rho}
+# Perhitungan teoritis manual
+gamma0_ma <- 1 + theta1^2 + theta2^2
+rho_ma <- c((theta1 + theta1 * theta2) / gamma0_ma,
+            theta2 / gamma0_ma,
+            0)
+round(rho_ma, 4)
+
+# Pembanding dari fungsi bawaan R
+round(ARMAacf(ma = c(theta1, theta2), lag.max = 3)[-1], 4)
+```
+
+```{r ma2-tabel}
+banding_acf(ma2_manual, rho_ma)   # data manual
+banding_acf(ma2_sim, rho_ma)      # data arima.sim
+```
+
+Nilai simulasi berada di sekitar nilai teoritis. Galat baku autokorelasi contoh pada \(n=300\) berkisar \(1/\sqrt{300}=0{,}058\) untuk lag yang autokorelasi teoritisnya nol, dan lebih besar untuk lag 1 dan 2 karena rumus Bartlett menambahkan suku \(2(\rho_1^2+\rho_2^2)\). Selisih pada kolom `selisih` masih berada dalam kisaran tersebut, sehingga data bangkitan konsisten dengan model MA(2) yang ditetapkan.
+
+# Proses AR(2)
+
+Model yang dibangkitkan:
+
+\[
+Y_t = 0.5\,Y_{t-1} + 0.2\,Y_{t-2} + e_t, \qquad e_t \sim N(0,1)
+\]
+
+## Pemeriksaan syarat kestasioneran
+
+Sebelum membangkitkan data, syarat stasioner AR(2) diperiksa lebih dahulu:
+
+\[
+\phi_1+\phi_2 = 0{,}7 < 1, \qquad
+\phi_2-\phi_1 = -0{,}3 < 1, \qquad
+|\phi_2| = 0{,}2 < 1
+\]
+
+```{r ar2-syarat}
+# Akar polinomial AR: 1 - 0.5B - 0.2B^2 = 0
+akar_ar <- polyroot(c(1, -phi1, -phi2))
+akar_ar
+Mod(akar_ar)
+```
+
+Kedua akar berada di luar lingkaran satuan (modulus 1,312 dan 3,812), sehingga proses AR(2) ini stasioner.
+
+## Pembangkitan data
+
+### Cara manual
+
+Rekursi AR membutuhkan dua nilai awal. Agar pengaruh nilai awal tidak terbawa ke dalam data, dibangkitkan 100 pengamatan tambahan sebagai *burn-in* yang kemudian dibuang.
+
+```{r ar2-manual}
+set.seed(1234)
+burn <- 100
+wn_ar <- rnorm(n + burn)
+
+ar2_semua <- numeric(n + burn)
+ar2_semua[1] <- wn_ar[1]
+ar2_semua[2] <- phi1 * ar2_semua[1] + wn_ar[2]
+for (i in 3:(n + burn)) {
+  ar2_semua[i] <- phi1 * ar2_semua[i - 1] + phi2 * ar2_semua[i - 2] + wn_ar[i]
+}
+
+ar2_manual <- ts(ar2_semua[-(1:burn)])
+head(ar2_manual, 10)
+```
+
+### Dengan `arima.sim()`
+
+```{r ar2-sim}
+set.seed(1234)
+ar2_sim <- arima.sim(list(order = c(2, 0, 0), ar = c(phi1, phi2)), n = n)
+
+head(ar2_sim, 10)
+```
+
+```{r ar2-banding-deret, fig.height=4}
+par(mfrow = c(1, 2))
+ts.plot(ar2_manual, main = "AR(2) manual", ylab = "Yt")
+ts.plot(ar2_sim, main = "AR(2) arima.sim", ylab = "Yt")
+par(mfrow = c(1, 1))
+```
+
+## Plot deret waktu
+
+```{r ar2-ts}
+ts.plot(ar2_manual, main = "Plot Deret Waktu AR(2)", ylab = "Yt")
+abline(h = mean(ar2_manual), col = "red", lty = 2)
+```
+
+Data bergerak di sekitar nilai tengah yang tetap dan selalu kembali ke sana setelah menyimpang (*mean reverting*). Dibandingkan MA(2), pergerakannya lebih halus dan penyimpangan dari rata-rata bertahan lebih lama karena nilai sekarang bergantung langsung pada dua nilai sebelumnya.
+
+## Plot ACF
+
+```{r ar2-acf}
+stats::acf(ar2_manual, lag.max = 20, main = "ACF AR(2)")
+```
+
+ACF *tails off*, menurun secara bertahap mengikuti pola eksponensial, dan tidak terputus pada lag tertentu. Ini ciri dari proses AR.
+
+## Plot PACF
+
+```{r ar2-pacf}
+pacf(ar2_manual, lag.max = 20, main = "PACF AR(2)")
+```
+
+PACF *cuts off* setelah lag 2. Nilai PACF pada lag 1 dan 2 nyata, sedangkan lag berikutnya berada di dalam batas kepercayaan. Secara teori \(\phi_{22} = \phi_2 = 0{,}2\) dan \(\phi_{kk} = 0\) untuk \(k > 2\).
+
+## Plot EACF
+
+```{r ar2-eacf}
+eacf(ar2_manual, ar.max = 5, ma.max = 5)
+```
+
+Ujung segitiga nol berada pada baris AR = 2 dan kolom MA = 0, sehingga EACF menyarankan ordo AR(2).
+
+## Identifikasi kestasioneran
+
+```{r ar2-stasioner}
+adf.test(ar2_manual)
+
+c(rataan = mean(ar2_manual), ragam = var(ar2_manual))
+```
+
+Data merupakan stasioner. Plot deret waktu tidak memperlihatkan tren maupun perubahan ragam, akar polinomial AR berada di luar lingkaran satuan, dan uji ADF menolak hipotesis adanya akar unit. Ragam teoritisnya
+
+\[
+\gamma_0=\frac{\sigma^2}{1-\phi_1\rho_1-\phi_2\rho_2}=1{,}7094
+\]
+
+## Scatterplot antarlag
+
+```{r ar2-scatter, fig.width=12, fig.height=4}
+plot_lag(ar2_manual, "AR(2)")
+```
+
+Hubungan positif terlihat pada ketiga lag dengan kemiringan yang semakin melandai dari lag 1 ke lag 3. Berbeda dengan MA(2), pada AR(2) hubungan antarlag tidak pernah terputus, hanya melemah secara bertahap.
+
+## Autokorelasi simulasi dan teoritis
+
+Autokorelasi teoritis AR(2) diperoleh dari persamaan Yule-Walker:
+
+\[
+\rho_1=\frac{\phi_1}{1-\phi_2}, \qquad
+\rho_2=\phi_1\rho_1+\phi_2, \qquad
+\rho_k=\phi_1\rho_{k-1}+\phi_2\rho_{k-2} \ \text{untuk} \ k\ge 3
+\]
+
+sehingga
+
+\[
+\rho_1=\frac{0.5}{0.8}=0{,}6250, \qquad
+\rho_2=0{,}5(0{,}625)+0{,}2=0{,}5125, \qquad
+\rho_3=0{,}5(0{,}5125)+0{,}2(0{,}625)=0{,}3813
+\]
+
+```{r ar2-rho}
+rho_ar    <- numeric(3)
+rho_ar[1] <- phi1 / (1 - phi2)
+rho_ar[2] <- phi1 * rho_ar[1] + phi2
+rho_ar[3] <- phi1 * rho_ar[2] + phi2 * rho_ar[1]
+round(rho_ar, 4)
+
+round(ARMAacf(ar = c(phi1, phi2), lag.max = 3)[-1], 4)
+```
+
+```{r ar2-tabel}
+banding_acf(ar2_manual, rho_ar)   # data manual
+banding_acf(ar2_sim, rho_ar)      # data arima.sim
+```
+
+Autokorelasi hasil simulasi mendekati nilai teoritis pada ketiga lag. Perbedaan yang tersisa berasal dari keragaman contoh pada proses dengan autokorelasi tinggi, galat baku autokorelasi contoh membesar karena suku \(2\sum\rho_j^2\) pada rumus Bartlett ikut membesar.
+
+# Proses ARMA(2,2)
+
+Model yang dibangkitkan:
+
+\[
+Y_t = 0.5\,Y_{t-1} + 0.2\,Y_{t-2} + e_t + 0.4\,e_{t-1} + 0.6\,e_{t-2}
+\]
+
+Bagian AR-nya sama dengan bagian AR(2) sebelumnya sehingga syarat stasioner terpenuhi, dan bagian MA-nya sama dengan bagian MA(2) sehingga syarat *invertible* juga terpenuhi.
+
+## Pembangkitan data
+
+### Cara manual
+
+```{r arma22-manual}
+set.seed(1234)
+wn_arma <- rnorm(n + burn)
+
+arma_semua <- numeric(n + burn)
+arma_semua[1] <- wn_arma[1]
+arma_semua[2] <- phi1 * arma_semua[1] + wn_arma[2] + theta1 * wn_arma[1]
+for (i in 3:(n + burn)) {
+  arma_semua[i] <- phi1 * arma_semua[i - 1] + phi2 * arma_semua[i - 2] +
+                   wn_arma[i] + theta1 * wn_arma[i - 1] + theta2 * wn_arma[i - 2]
+}
+
+arma22_manual <- ts(arma_semua[-(1:burn)])
+head(arma22_manual, 10)
+```
+
+### Dengan `arima.sim()`
+
+```{r arma22-sim}
+set.seed(1234)
+arma22_sim <- arima.sim(
+  list(order = c(2, 0, 2), ar = c(phi1, phi2), ma = c(theta1, theta2)),
+  n = n
+)
+
+head(arma22_sim, 10)
+```
+
+```{r arma22-banding-deret, fig.height=4}
+par(mfrow = c(1, 2))
+ts.plot(arma22_manual, main = "ARMA(2,2) manual", ylab = "Yt")
+ts.plot(arma22_sim, main = "ARMA(2,2) arima.sim", ylab = "Yt")
+par(mfrow = c(1, 1))
+```
+
+## Plot deret waktu
+
+```{r arma22-ts}
+ts.plot(arma22_manual, main = "Plot Deret Waktu ARMA(2,2)", ylab = "Yt")
+abline(h = mean(arma22_manual), col = "red", lty = 2)
+```
+
+Data tetap berfluktuasi di sekitar nilai tengah tetap, tetapi amplitudonya lebih besar daripada kedua proses sebelumnya. Hal ini wajar karena ragam teoritisnya \(\gamma_0 = 5{,}02\), jauh di atas 1,52 pada MA(2) dan 1,71 pada AR(2). Komponen AR dan MA sama-sama memperkuat ragam.
+
+## Plot ACF
+
+```{r arma22-acf}
+stats::acf(arma22_manual, lag.max = 20, main = "ACF ARMA(2,2)")
+```
+
+ACF *tails off*, menurun bertahap tanpa terputus. Pada ARMA, komponen AR membuat ACF tidak pernah *cut off*.
+
+## Plot PACF
+
+```{r arma22-pacf}
+pacf(arma22_manual, lag.max = 20, main = "PACF ARMA(2,2)")
+```
+
+PACF juga *tails off*. Keduanya *tails off* merupakan ciri model campuran ARMA, sehingga ordo p dan q tidak dapat dibaca langsung dari ACF maupun PACF, dan identifikasi ordo bergantung pada EACF atau kriteria informasi.
+
+## Plot EACF
+
+```{r arma22-eacf}
+eacf(arma22_manual, ar.max = 5, ma.max = 5)
+```
+
+Ujung segitiga nol mengarah ke baris AR = 2 dan kolom MA = 2. Perlu dicatat bahwa EACF pada model campuran cenderung kurang jelas dibanding pada model murni AR atau MA, sehingga ordo di sekitarnya, misalnya (1,2) atau (2,1), sering ikut terlihat memungkinkan.
+
+## Identifikasi kestasioneran
+
+```{r arma22-stasioner}
+adf.test(arma22_manual)
+
+c(rataan = mean(arma22_manual), ragam = var(arma22_manual))
+```
+
+Data merupakan stasioner. Kestasioneran ARMA hanya ditentukan oleh bagian AR-nya, dan akar polinomial \(1-0.5B-0.2B^2\) sudah diperiksa berada di luar lingkaran satuan pada bagian sebelumnya. Bagian MA tidak memengaruhi kestasioneran, hanya memengaruhi keterbalikan (*invertibility*). Uji ADF memberi kesimpulan yang sama.
+
+## Scatterplot antarlag
+
+```{r arma22-scatter, fig.width=12, fig.height=4}
+plot_lag(arma22_manual, "ARMA(2,2)")
+```
+
+Ketiga lag menunjukkan hubungan positif yang kuat, dan pelemahannya dari lag 1 ke lag 3 lebih lambat dibandingkan AR(2). Penyebabnya, komponen MA menambah korelasi pada lag-lag awal di atas korelasi yang sudah dihasilkan komponen AR.
+
+## Autokorelasi simulasi dan teoritis
+
+Autokorelasi teoritis ARMA(2,2) paling mudah diperoleh melalui bobot \(\psi\) pada bentuk \(MA(\infty)\):
+
+\[
+Y_t=\sum_{j=0}^{\infty}\psi_j e_{t-j}, \qquad
+\gamma_k=\sigma^2\sum_{j=0}^{\infty}\psi_j\psi_{j+k}, \qquad
+\rho_k=\frac{\gamma_k}{\gamma_0}
+\]
+
+dengan \(\psi_0=1\), \(\psi_1=\phi_1+\theta_1\), \(\psi_2=\phi_1\psi_1+\phi_2\psi_0+\theta_2\), dan \(\psi_j=\phi_1\psi_{j-1}+\phi_2\psi_{j-2}\) untuk \(j>2\).
+
+```{r arma22-rho}
+# Bobot psi
+J   <- 500
+psi <- numeric(J + 1)
+psi[1] <- 1                                   # psi_0
+psi[2] <- phi1 + theta1                       # psi_1
+psi[3] <- phi1 * psi[2] + phi2 * psi[1] + theta2
+for (j in 4:(J + 1)) {
+  psi[j] <- phi1 * psi[j - 1] + phi2 * psi[j - 2]
+}
+
+gamma_arma <- sapply(0:3, function(k) sum(psi[1:(J + 1 - k)] * psi[(1 + k):(J + 1)]))
+rho_arma   <- gamma_arma[-1] / gamma_arma[1]
+
+round(gamma_arma, 4)   # gamma_0 sampai gamma_3
+round(rho_arma, 4)     # rho_1 sampai rho_3
+
+# Pembanding dari fungsi bawaan R
+round(ARMAacf(ar = c(phi1, phi2), ma = c(theta1, theta2), lag.max = 3)[-1], 4)
+```
+
+Hasilnya
+
+\[
+\rho_1 = 0{,}8592, \qquad \rho_2 = 0{,}7492, \qquad \rho_3 = 0{,}5464
+\]
+
+```{r arma22-tabel}
+banding_acf(arma22_manual, rho_arma)   # data manual
+banding_acf(arma22_sim, rho_arma)      # data arima.sim
+```
+
+Autokorelasi hasil simulasi mengikuti nilai teoritis pada ketiga lag. Untuk lag yang lebih besar dari \(q=2\), autokorelasi mengikuti rekursi AR murni, yaitu \(\rho_k=\phi_1\rho_{k-1}+\phi_2\rho_{k-2}\), yang dapat diperiksa pada \(\rho_3=0{,}5(0{,}7492)+0{,}2(0{,}8592)=0{,}5464\).
+
+# Ringkasan
+
+```{r ringkasan}
+ringkasan <- data.frame(
+  proses    = c("MA(2)", "AR(2)", "ARMA(2,2)"),
+  ACF       = c("cuts off lag 2", "tails off", "tails off"),
+  PACF      = c("tails off", "cuts off lag 2", "tails off"),
+  rho1      = round(c(rho_ma[1], rho_ar[1], rho_arma[1]), 4),
+  rho2      = round(c(rho_ma[2], rho_ar[2], rho_arma[2]), 4),
+  rho3      = round(c(rho_ma[3], rho_ar[3], rho_arma[3]), 4),
+  ragam     = round(c(1 + theta1^2 + theta2^2,
+                      1 / (1 - phi1 * rho_ar[1] - phi2 * rho_ar[2]),
+                      gamma_arma[1]), 4),
+  stasioner = c("ya", "ya", "ya")
+)
+ringkasan
+```
+
+Ketiga proses yang dibangkitkan merupakan stasioner. Pada MA(2) kestasioneran berlaku otomatis karena deretnya merupakan kombinasi linear berhingga dari *white noise*. Pada AR(2) dan ARMA(2,2) kestasioneran berasal dari akar polinomial AR yang berada di luar lingkaran satuan, dengan \(\phi_1+\phi_2=0{,}7<1\).
+
+Pola ACF dan PACF pada data bangkitan sesuai dengan teori dan cukup untuk membedakan ketiga proses yaitu ACF yang terputus di lag 2 menandai MA(2), PACF yang terputus di lag 2 menandai AR(2), dan keduanya menurun secara bertahap menandai model campuran. Autokorelasi contoh pada lag 1 sampai 3 berada di sekitar nilai teoritisnya untuk ketiga model, dengan simpangan yang masih wajar untuk ukuran contoh 300.
