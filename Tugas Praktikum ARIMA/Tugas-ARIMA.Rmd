@@ -1,0 +1,491 @@
+---
+title: "Tugas Praktikum Pemodelan ARIMA"
+author: "Fido Ahmad"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output: rmdformats::readthedown
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 4.5, fig.align = "center")
+```
+
+# Packages
+
+```{r}
+library(readxl)
+library(ggplot2)
+library(tsibble)
+library(tseries)
+library(MASS)
+library(forecast)
+library(TSA)
+library(lmtest)
+```
+
+# Data
+
+Data yang digunakan adalah **MLTempDataset**, yaitu data per jam dengan peubah `DAYTON_MW`. Data penuh berisi 6.676 amatan (4 Januari 2022 00:00 sampai 9 Oktober 2022 03:00). Di tugas ini digunakan **500 amatan pertama**.
+
+```{r}
+data <- read_excel("MLTempDataset.xlsx", .name_repair = "minimal")
+str(data)
+```
+
+```{r}
+data500 <- data[1:500, c("Datetime", "DAYTON_MW")]
+head(data500)
+tail(data500)
+```
+
+```{r}
+data.ts <- ts(data500$DAYTON_MW)
+summary(data.ts)
+```
+
+## Plot data penuh (500 amatan)
+
+```{r}
+plot.ts(data.ts,
+        lty = 1,
+        xlab = "Waktu (jam ke-)",
+        ylab = "DAYTON_MW",
+        main = "Plot Data DAYTON_MW (500 amatan)")
+```
+
+Plot memperlihatkan data berfluktuasi di sekitar nilai tengah tanpa tren naik atau turun yang jelas. Terdapat penurunan tajam berulang, sehingga sebaran data cenderung menjulur ke kiri. Terlihat juga pola naik-turun yang berulang.
+
+# Tahap 1: Pembagian data latih dan data uji
+
+Pembagian data dilakukan dengan proporsi **90% : 10%**, yaitu 450 amatan pertama sebagai data latih dan 50 amatan terakhir sebagai data uji. Proporsi data uji dibuat lebih kecil karena model ARIMA pada data per jam hanya informatif untuk horizon pendek.
+
+```{r}
+train <- data.ts[1:450]
+test  <- data.ts[451:500]
+train.ts <- ts(train)
+test.ts  <- ts(test, start = 451)
+```
+
+```{r}
+plot.ts(data.ts, xlab = "Waktu (jam ke-)", ylab = "DAYTON_MW",
+        main = "Pembagian Data Latih dan Data Uji")
+abline(v = 450.5, col = "red", lty = 2, lwd = 2)
+legend("bottomleft", legend = c("Batas latih | uji"), col = "red", lty = 2, bty = "n")
+```
+
+## Plot data latih
+
+```{r}
+plot.ts(train.ts, lty = 1, xlab = "Waktu (jam ke-)", ylab = "DAYTON_MW",
+        main = "Plot Data Latih")
+```
+
+## Plot data uji
+
+```{r}
+plot.ts(test.ts, lty = 1, xlab = "Waktu (jam ke-)", ylab = "DAYTON_MW",
+        main = "Plot Data Uji")
+```
+
+# Tahap 2: Uji stasioneritas data latih
+
+## Stasioneritas dalam rataan
+
+### Plot ACF
+
+```{r}
+acf(train.ts, lag.max = 30, main = "ACF Data Latih")
+```
+
+Plot ACF menunjukkan autokorelasi yang menurun cukup cepat dan masuk batas signifikansi sekitar lag ke-8, sehingga data latih dapat dianggap stasioner dalam rataan. Kenaikan ACF kembali pada lag 22–26 mengindikasikan adanya pola harian (24 jam).
+
+### Uji ADF
+
+```{r}
+adf.train <- tseries::adf.test(train.ts)
+adf.train
+```
+
+$H_0$ : Data tidak stasioner dalam rataan
+
+$H_1$ : Data stasioner dalam rataan
+
+Berdasarkan uji ADF, didapat *p-value* sebesar `r round(adf.train$p.value, 4)` kurang dari taraf nyata 5% sehingga **tolak $H_0$**. Artinya, data latih **stasioner dalam rataan**, hasil ini sesuai dengan plot deret waktu dan plot ACF, sehingga **tidak perlu dilakukan *differencing***.
+
+## Stasioneritas dalam ragam
+
+### Plot Box-Cox
+
+```{r}
+index <- seq(1:450)
+
+bc <- boxcox(train.ts ~ index, lambda = seq(-2, 3, by = 0.01))
+```
+
+```{r}
+# Nilai lambda optimum
+lambda <- bc$x[which.max(bc$y)]
+lambda
+```
+
+```{r}
+# Selang kepercayaan 95% untuk lambda
+ci_lambda <- bc$x[bc$y > max(bc$y) - 0.5 * qchisq(0.95, 1)]
+
+ci_lower <- min(ci_lambda)
+ci_upper <- max(ci_lambda)
+
+c(Batas_Bawah = ci_lower, Batas_Atas = ci_upper)
+```
+
+Nilai $\lambda$ optimum sebesar `r lambda` dengan selang kepercayaan 95% (`r ci_lower`; `r ci_upper`). Selang tersebut **tidak memuat nilai 1**, sehingga data latih **tidak stasioner dalam ragam** dan perlu ditransformasi.
+
+# Tahap 3: Penanganan ketidakstasioneran
+
+## Transformasi Box-Cox
+
+Karena selang kepercayaan $\lambda$ memuat nilai 2, digunakan $\lambda$ yang dibulatkan, yaitu $\lambda = 2$. Transformasi yang dilakukan adalah transformasi kuadrat:
+
+$$
+Z_t = Y_t^{2}
+$$
+
+Seluruh data bernilai positif (minimum `r min(train)`), sehingga tidak perlu penambahan konstanta.
+
+```{r}
+lambda.bulat <- 2
+train.bc <- train.ts^lambda.bulat
+```
+
+```{r}
+plot.ts(train.bc, lty = 1, xlab = "Waktu (jam ke-)", ylab = expression(Y[t]^2),
+        main = "Plot Data Latih Setelah Transformasi")
+```
+
+## Pengecekan ulang stasioneritas dalam ragam
+
+```{r}
+bc2 <- boxcox(train.bc ~ index, lambda = seq(-1, 3, by = 0.01))
+```
+
+```{r}
+lambda2 <- bc2$x[which.max(bc2$y)]
+lambda2
+```
+
+```{r}
+ci_lambda2 <- bc2$x[bc2$y > max(bc2$y) - 0.5 * qchisq(0.95, 1)]
+c(Batas_Bawah = min(ci_lambda2), Batas_Atas = max(ci_lambda2))
+```
+
+Setelah transformasi, nilai $\lambda$ optimum sebesar `r lambda2` dengan selang kepercayaan 95% (`r min(ci_lambda2)`; `r max(ci_lambda2)`). Selang tersebut **memuat nilai 1**, sehingga data hasil transformasi sudah **stasioner dalam ragam**.
+
+## Pengecekan ulang stasioneritas dalam rataan
+
+```{r}
+acf(train.bc, lag.max = 30, main = "ACF Data Latih Transformasi")
+```
+
+```{r}
+adf.bc <- tseries::adf.test(train.bc)
+adf.bc
+```
+
+$H_0$ : Data tidak stasioner dalam rataan
+
+$H_1$ : Data stasioner dalam rataan
+
+Uji ADF pada data transformasi menghasilkan *p-value* `r round(adf.bc$p.value, 4)` < 5%, sehingga tolak $H_0$. Data transformasi tetap **stasioner dalam rataan**, sehingga pemodelan dilakukan tanpa *differencing* ($d = 0$).
+
+# Tahap 4: Identifikasi model
+
+## Plot ACF
+
+```{r}
+acf(train.bc, lag.max = 30, main = "ACF")
+```
+
+Plot ACF cenderung *tails off* secara eksponensial. Jika ACF dianggap *cuts off* pada lag ke-6 (lag terakhir yang signifikan sebelum masuk batas), modelnya adalah **ARIMA(0,0,6)**.
+
+## Plot PACF
+
+```{r}
+pacf(train.bc, lag.max = 30, main = "PACF")
+```
+
+Plot PACF *cuts off* pada lag pertama, sedangkan ACF *tails off*, sehingga model tentatifnya adalah **ARIMA(1,0,0)**. Jika ACF dan PACF sama-sama dianggap *tails off*, model tentatifnya adalah **ARIMA(1,0,1)**.
+
+## Plot EACF
+
+```{r}
+eacf(train.bc)
+```
+
+Berdasarkan ujung segitiga nol pada plot EACF, diperoleh model tentatif **ARIMA(1,0,0)**, **ARIMA(2,0,1)**, dan **ARIMA(3,0,2)**.
+
+Seluruh model tentatif yang akan diduga:
+
+- ARIMA(1,0,0)
+- ARIMA(0,0,6)
+- ARIMA(1,0,1)
+- ARIMA(2,0,1)
+- ARIMA(3,0,2)
+
+# Tahap 5: Pendugaan parameter model tentatif
+
+## ARIMA(1,0,0)
+
+```{r}
+model1 <- Arima(train.bc, order = c(1,0,0), method = "ML")
+summary(model1)
+lmtest::coeftest(model1)
+```
+
+## ARIMA(0,0,6)
+
+```{r}
+model2 <- Arima(train.bc, order = c(0,0,6), method = "ML")
+summary(model2)
+lmtest::coeftest(model2)
+```
+
+## ARIMA(1,0,1)
+
+```{r}
+model3 <- Arima(train.bc, order = c(1,0,1), method = "ML")
+summary(model3)
+lmtest::coeftest(model3)
+```
+
+## ARIMA(2,0,1)
+
+```{r}
+model4 <- Arima(train.bc, order = c(2,0,1), method = "ML")
+summary(model4)
+lmtest::coeftest(model4)
+```
+
+## ARIMA(3,0,2)
+
+```{r}
+model5 <- Arima(train.bc, order = c(3,0,2), method = "ML")
+summary(model5)
+lmtest::coeftest(model5)
+```
+
+## Ringkasan AIC dan signifikansi parameter
+
+```{r}
+jml_tidak_sig <- function(m) {
+  ct <- lmtest::coeftest(m)
+  sum(is.na(ct[, 4]) | ct[, 4] > 0.05)
+}
+
+model_list <- list(model1, model2, model3, model4, model5)
+
+model_tentatif <- data.frame(
+  Model = c("ARIMA(1,0,0)", "ARIMA(0,0,6)", "ARIMA(1,0,1)",
+            "ARIMA(2,0,1)", "ARIMA(3,0,2)"),
+  AIC = sapply(model_list, AIC),
+  BIC = sapply(model_list, BIC),
+  Parameter_Tidak_Signifikan = sapply(model_list, jml_tidak_sig)
+)
+
+model_tentatif[order(model_tentatif$AIC), ]
+```
+
+Secara angka, AIC terkecil dimiliki oleh ARIMA(3,0,2) dengan seluruh parameter signifikan. Namun, dugaan koefisien `ma2` pada model tersebut sebesar `r round(coef(model5)["ma2"], 5)`, bisa dikatakan sama dengan 1. Hal ini perlu diperiksa melalui syarat *invertibility*, seluruh akar polinomial MA harus berada di luar lingkaran satuan (modulus > 1).
+
+```{r}
+# Modulus akar polinomial MA: 1 + theta1*B + theta2*B^2 = 0
+akar_ma <- polyroot(c(1, coef(model5)[c("ma1", "ma2")]))
+Mod(akar_ma)
+
+# Modulus akar polinomial AR: 1 - phi1*B - phi2*B^2 - phi3*B^3 = 0
+akar_ar <- polyroot(c(1, -coef(model5)[c("ar1", "ar2", "ar3")]))
+Mod(akar_ar)
+```
+
+Modulus akar MA model ARIMA(3,0,2) bernilai `r round(min(Mod(akar_ma)), 5)`, yaitu berada di lingkaran satuan. Artinya model berada di batas **tidak invertible**, pendugaan berhenti di batas ruang parameter, sehingga galat baku dan uji signifikansinya tidak dapat dipercaya. Oleh karena itu, ARIMA(3,0,2) tidak dipilih.
+
+Di antara model yang valid, AIC terkecil dimiliki oleh **ARIMA(1,0,0)** dan seluruh parameternya signifikan pada taraf nyata 5%. Model ARIMA(0,0,6) juga seluruh parameternya signifikan, tetapi AIC-nya lebih besar dengan jumlah parameter yang jauh lebih banyak. ARIMA(1,0,1) dan ARIMA(2,0,1) memiliki parameter yang tidak signifikan. Oleh karena itu, model terbaik yang dipilih adalah **ARIMA(1,0,0)**, yaitu
+
+$$
+Z_t = \mu + \phi_1 (Z_{t-1} - \mu) + e_t, \qquad Z_t = Y_t^2
+$$
+
+dengan $\hat\phi_1 =$ `r round(coef(model1)[1], 4)` dan $\hat\mu =$ `r round(coef(model1)[2], 4)`.
+
+# Tahap 6: Analisis sisaan
+
+Sisaan model ARIMA harus memenuhi asumsi normalitas, kebebasan sisaan, kehomogenan ragam, dan nilai tengah sisaan sama dengan nol. Diagnostik dilakukan secara eksploratif dan uji formal.
+
+## Eksplorasi sisaan
+
+```{r, fig.height=7}
+sisaan <- model1$residuals
+
+par(mfrow = c(2,2), mar = c(4,4,2,1))
+
+qqnorm(sisaan, main = "Normal Q-Q Plot")
+qqline(sisaan, col = "blue", lwd = 2)
+
+plot(c(1:length(sisaan)), sisaan, type = "p",
+     main = "Plot Sisaan vs Waktu", xlab = "Waktu", ylab = "Sisaan")
+abline(h = 0, col = "red")
+
+acf(sisaan, lag.max = 30, main = "ACF Sisaan")
+pacf(sisaan, lag.max = 30, main = "PACF Sisaan")
+
+par(mfrow = c(1,1))
+```
+
+Plot kuantil-kuantil normal memperlihatkan titik-titik menyimpang dari garis pada kedua ujung, sehingga sisaan cenderung tidak menyebar normal. Plot sisaan vs waktu memperlihatkan lebar pita yang tidak seragam, yang mengindikasikan ragam tidak homogen. Plot ACF dan PACF sisaan tidak signifikan pada lag-lag awal, tetapi masih terdapat yang signifikan pada lag 22 sampai 25 (serta lag 13 dan 28), lonjakan terbesar ada di lag 23 dan 24 yang merupakan pola harian.
+
+## Uji formal
+
+### Sisaan menyebar normal
+
+```{r}
+ks.test(sisaan, "pnorm", mean = mean(sisaan), sd = sd(sisaan))
+```
+
+$H_0$ : Sisaan menyebar normal
+
+$H_1$ : Sisaan tidak menyebar normal
+
+Berdasarkan uji tersebut, *p-value* < 5% sehingga tolak $H_0$, artinya **sisaan tidak menyebar normal**. Hal ini sesuai dengan plot kuantil-kuantil normal.
+
+### Sisaan saling bebas
+
+```{r}
+Box.test(sisaan, type = "Ljung")
+```
+
+$H_0$ : Sisaan saling bebas
+
+$H_1$ : Sisaan tidak saling bebas
+
+*P-value* uji Ljung-Box lebih besar dari 5% sehingga tak tolak $H_0$, artinya **sisaan saling bebas** pada lag pertama. Sebagai pelengkap, uji pada lag 24:
+
+```{r}
+Box.test(sisaan, lag = 24, type = "Ljung", fitdf = 1)
+```
+
+Pada lag 24, *p-value* < 5% sehingga masih terdapat autokorelasi sisaan pada lag yang lebih jauh. Autokorelasi ini berasal dari pola harian (periode 24 jam) yang tidak dapat ditangkap oleh model ARIMA non-musiman.
+
+### Ragam sisaan homogen
+
+```{r}
+Box.test((sisaan)^2, type = "Ljung")
+```
+
+$H_0$ : Ragam sisaan homogen
+
+$H_1$ : Ragam sisaan tidak homogen
+
+*P-value* uji Ljung-Box terhadap sisaan kuadrat < 5% sehingga tolak $H_0$, artinya **ragam sisaan tidak homogen**. Hal ini sesuai dengan plot sisaan vs waktu.
+
+### Nilai tengah sisaan sama dengan nol
+
+```{r}
+t.test(sisaan, mu = 0, conf.level = 0.95)
+```
+
+$H_0$ : Nilai tengah sisaan sama dengan 0
+
+$H_1$ : Nilai tengah sisaan tidak sama dengan 0
+
+*P-value* uji-t > 5% sehingga tak tolak $H_0$, artinya **nilai tengah sisaan sama dengan nol**.
+
+# Tahap 7: Overfitting
+
+*Overfitting* dilakukan dengan menaikkan orde AR dan MA dari model ARIMA(1,0,0), sehingga kandidat model *overfitting* adalah **ARIMA(2,0,0)** dan **ARIMA(1,0,1)**.
+
+## ARIMA(2,0,0)
+
+```{r}
+model1a <- Arima(train.bc, order = c(2,0,0), method = "ML")
+summary(model1a)
+lmtest::coeftest(model1a)
+```
+
+## ARIMA(1,0,1)
+
+```{r}
+model1b <- Arima(train.bc, order = c(1,0,1), method = "ML")
+summary(model1b)
+lmtest::coeftest(model1b)
+```
+
+```{r}
+overfitting <- data.frame(
+  Model = c("ARIMA(1,0,0)", "ARIMA(2,0,0)", "ARIMA(1,0,1)"),
+  AIC   = c(AIC(model1), AIC(model1a), AIC(model1b)),
+  BIC   = c(BIC(model1), BIC(model1a), BIC(model1b)),
+  Parameter_Tidak_Signifikan = c(jml_tidak_sig(model1), jml_tidak_sig(model1a),
+                                 jml_tidak_sig(model1b))
+)
+overfitting
+```
+
+Kedua model hasil *overfitting* memiliki AIC yang lebih besar dibandingkan ARIMA(1,0,0), dan parameter tambahannya (`ar2` pada ARIMA(2,0,0) dan `ma1` pada ARIMA(1,0,1)) tidak signifikan. Oleh karena itu, model **ARIMA(1,0,0)** tetap digunakan untuk peramalan.
+
+# Tahap 8: Peramalan
+
+Peramalan dilakukan untuk 50 periode ke depan sesuai panjang data uji. Karena model dibangun pada data hasil transformasi $Z_t = Y_t^2$, hasil ramalan dikembalikan ke skala asli dengan transformasi balik $\hat Y_t = \sqrt{\hat Z_t}$.
+
+```{r}
+ramalan <- forecast::forecast(model1, h = length(test.ts))
+plot(ramalan, main = "Ramalan ARIMA(1,0,0) pada Skala Transformasi")
+```
+
+```{r}
+# Transformasi balik ke skala asli
+balik <- function(z) sqrt(pmax(z, 0))
+
+hasil <- balik(as.numeric(ramalan$mean))
+lo95  <- balik(as.numeric(ramalan$lower[, "95%"]))
+hi95  <- balik(as.numeric(ramalan$upper[, "95%"]))
+
+perbandingan <- data.frame(
+  Periode  = 451:500,
+  Datetime = data500$Datetime[451:500],
+  Aktual   = as.numeric(test.ts),
+  Forecast = round(hasil, 3),
+  Lo95     = round(lo95, 3),
+  Hi95     = round(hi95, 3)
+)
+head(perbandingan, 10)
+```
+
+```{r}
+plot(1:500, as.numeric(data.ts), type = "l", col = "black",
+     xlab = "Waktu (jam ke-)", ylab = "DAYTON_MW",
+     main = "Data Aktual dan Hasil Ramalan ARIMA(1,0,0)",
+     ylim = range(c(data.ts, lo95, hi95)))
+polygon(c(451:500, 500:451), c(lo95, rev(hi95)),
+        col = adjustcolor("skyblue", 0.4), border = NA)
+lines(451:500, hasil, col = "blue", lwd = 2, lty = 2)
+abline(v = 450.5, col = "red", lty = 3)
+legend("bottomleft",
+       legend = c("Data Aktual", "Forecast", "Selang 95%"),
+       col = c("black", "blue", "skyblue"),
+       lty = c(1, 2, NA), lwd = c(1, 2, NA), pch = c(NA, NA, 15), bty = "n")
+```
+
+## Akurasi peramalan
+
+```{r}
+akurasi <- accuracy(hasil, as.numeric(test.ts))
+akurasi
+```
+
+Model ARIMA(1,0,0) menghasilkan MAPE sebesar `r round(akurasi[, "MAPE"], 2)`% dan RMSE sebesar `r round(akurasi[, "RMSE"], 3)` pada data uji. Ramalan bergerak dari nilai terakhir data latih menuju nilai tengah jangka panjang model, sebagaimana karakteristik model AR(1) yang stasioner. Akibatnya, ramalan tidak mampu mengikuti fluktuasi harian maupun penurunan tajam pada data uji, meskipun hampir seluruh data aktual (`r round(100*mean(test.ts >= lo95 & test.ts <= hi95))`%) masih berada dalam selang kepercayaan 95%. Selang tersebut sangat lebar, sehingga nilai praktisnya terbatas.
+
+# Kesimpulan
+
+1. Data latih (450 amatan) stasioner dalam rataan berdasarkan plot ACF dan uji ADF, tetapi tidak stasioner dalam ragam karena selang kepercayaan $\lambda$ Box-Cox tidak memuat 1. Transformasi kuadrat ($\lambda = 2$) membuat data stasioner dalam ragam.
+2. Model tentatif dari ACF, PACF, dan EACF adalah ARIMA(1,0,0), ARIMA(0,0,6), ARIMA(1,0,1), ARIMA(2,0,1), dan ARIMA(3,0,2). ARIMA(3,0,2) memiliki AIC terkecil tetapi tidak invertible, sehingga model terbaik adalah **ARIMA(1,0,0)** dengan AIC terkecil di antara model yang valid dan seluruh parameter signifikan. *Overfitting* ke ARIMA(2,0,0) dan ARIMA(1,0,1) tidak menghasilkan model yang lebih baik.
+3. Sisaan model memenuhi asumsi kebebasan pada lag pertama dan nilai tengah nol, tetapi tidak memenuhi asumsi normalitas dan kehomogenan ragam, serta masih mengandung autokorelasi pada lag sekitar 24.
+4. Ramalan 50 jam ke depan menghasilkan MAPE 55,28%, sehingga model ARIMA kurang cocok untuk data ini. Penyebab utamanya, data memiliki pola harian (berulang setiap 24 jam) yang tidak dapat ditangkap oleh ARIMA(1,0,0), dan ragam sisaannya tidak homogen. Model yang lebih sesuai adalah SARIMA dengan periode 24 dan GARCH.
